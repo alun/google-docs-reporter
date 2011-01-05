@@ -1,20 +1,17 @@
 package com.katlex.reporter
 
 import com.google.api.client.googleapis.GoogleTransport
-import com.google.api.client.googleapis.json.JsonCParser
 import com.google.api.client.googleapis.auth.clientlogin.ClientLogin
-import org.apache.http.conn.ConnectTimeoutException
-import java.net.UnknownHostException
-import java.text.SimpleDateFormat
-import java.util.{Locale, TimeZone, Calendar, Date}
-import xml.{Node, XML}
-import collection.immutable.Seq
-import com.google.api.client.http.{HttpContent, HttpResponseException}
+import com.google.api.client.http.HttpContent
 import java.io.OutputStream
+import xml.{Node, XML, NodeBuffer}
+import java.text.SimpleDateFormat
+import java.util.{Calendar, TimeZone}
+import java.util.Date
 
 object StringSubstitution {
   implicit def stringSubstitute(s: String) = new Object {
-    def |(substitutions: { def toString: String }*) = {
+    def |(substitutions: Any*) = {
       val replacements = for {
         (s, i) <- substitutions.zipWithIndex
         ph = "\\{" + i + "\\}"
@@ -31,7 +28,6 @@ import StringSubstitution._
 
 object GoogleClient {
   val transport = GoogleTransport.create
-  transport.addParser(new JsonCParser)
 
   def login(username: String, password: String) {
     val a = new ClientLogin
@@ -62,6 +58,20 @@ object GoogleClient {
     }
     rq.execute.parseAsString
   }
+}
+object Entry {
+  def apply(values: (Any, Any)*) =
+    <entry xmlns="http://www.w3.org/2005/Atom"
+          xmlns:gsx="http://schemas.google.com/spreadsheets/2006/extended">
+      {
+        var buffer = new NodeBuffer
+        for {
+          (column, value) <- values
+        } buffer ++= XML.loadString(
+          "<gsx:{0}>{1}</gsx:{0}>" | (column, value))
+        buffer
+      }
+    </entry>
 }
 object GoogleDate {
   private val UTC = TimeZone.getTimeZone("UTC")
@@ -94,8 +104,12 @@ class SpreadSheet(val title: String, val updated: Date,
 
   class WorkSheet(val title: String, val updated: Date,
                     val id: EntityId, val rowCount: Int) extends PrettyDate {
-    override def toString = "{0} [{1}] {2} - {3}" | (id, prettyDate, title, rowCount.toString)
+    override def toString = "{0} [{1}] {2} - {3}" |
+                            (id, prettyDate, title, rowCount)
     def listUrl = SpreadSheetsUrl("list/{0}/{1}/private/full" | (key, id))
+    def addLine(values: (Any, Any)*) =
+      GoogleClient.postXml(listUrl)(Entry(values: _*))
+
   }
   object WorkSheet {
     def apply(title: String, updated: String, id: String, rowCount: String) =
@@ -135,54 +149,5 @@ object SpreadSheets {
         id = (entry \ "id").text
       } yield SpreadSheet(title, updated, id)
     })
-  }
-}
-
-object GoogleDocs extends Application {
-  private def obtainUserAndPassword = {
-    val Array(user, passwd) = Array("google.user", "google.password").
-                                    map(System.getProperty)
-    if (user == null || passwd == null) {
-      println("""Please, specify user name and password
-        |for google connetion through java system properties
-        |-Dgoogle.user and -Dgoogle.password""".stripMargin)
-      System.exit(1)
-    }
-    (user, passwd)
-  }
-
-  private def error(msg: String) = {
-    Console.err.println(msg)
-    System.exit(2)
-  }
-
-  try {
-    val (user, passwd) = obtainUserAndPassword
-    GoogleClient.login(user, passwd)
-
-    val newEntry =
-      <entry xmlns="http://www.w3.org/2005/Atom"
-          xmlns:gsx="http://schemas.google.com/spreadsheets/2006/extended">
-        <gsx:total>15</gsx:total>
-        <gsx:active>20</gsx:active>
-      </entry>
-
-    for {
-      spreadSheet <- SpreadSheets.load.entries.find(_.title == "vbg.report.players").headOption
-      workSheet <- spreadSheet.load.entries.headOption
-      url = workSheet.listUrl
-    } GoogleClient.postXml(url)(newEntry)
-
-    println("OK")
-  } catch {
-    case e: HttpResponseException =>
-      try {
-        val info = e.response.parseAs(classOf[ClientLogin.ErrorInfo])
-        error(info.error)
-      } catch { case _ => error(e.response.parseAsString)}
-    case _: ConnectTimeoutException =>
-      error("Host connetion is timed out")
-    case e: UnknownHostException =>
-      error("Unknown host: " + e.getMessage)
   }
 }
